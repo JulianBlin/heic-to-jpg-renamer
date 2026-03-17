@@ -3,25 +3,23 @@ import re
 from PIL import Image, ExifTags
 import pillow_heif
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 pillow_heif.register_heif_opener()
 
 DATE_PATTERN = re.compile(r'^\d{8}_\d{6}')
+rename_lock = Lock()
 
 def is_already_renamed(filename):
     name = os.path.splitext(filename)[0]
     return bool(DATE_PATTERN.match(name))
 
 def convert_heic_to_jpeg_with_exif(heic_path, jpeg_path):
-    try:
-        with Image.open(heic_path) as heic_image:
-            exif_data = heic_image.info.get("exif", None)
-            heic_image.save(jpeg_path, "JPEG", quality=100, subsampling=0, exif=exif_data)
-        print(f"Conversion réussie avec EXIF : {heic_path} -> {jpeg_path}")
-        return True
-    except Exception as e:
-        print(f"Erreur lors de la conversion : {e}")
-        return False
+    with Image.open(heic_path) as heic_image:
+        exif_data = heic_image.info.get("exif", None)
+        heic_image.save(jpeg_path, "JPEG", quality=100, subsampling=0, exif=exif_data)
+    return jpeg_path
 
 def get_date_taken(img_path):
     with Image.open(img_path) as img:
@@ -34,49 +32,71 @@ def get_date_taken(img_path):
             date = img_exif.get(306)  # Fallback: DateTime
         return date
 
-def rename_jpeg(img_path, output_folder):
-    try:
-        date = get_date_taken(img_path)
-        if date is None:
-            print(f"Impossible de renommer {img_path} : date EXIF introuvable.")
-            return
-        new_name = date.replace(' ', '_').replace(':', '')
-        file_extension = os.path.splitext(img_path)[-1]
+def safe_rename(img_path, output_folder, date):
+    new_name = date.replace(' ', '_').replace(':', '')
+    file_extension = os.path.splitext(img_path)[-1]
+    with rename_lock:
         full_new_name = os.path.join(output_folder, new_name + file_extension)
         counter = 1
         while os.path.exists(full_new_name):
             full_new_name = os.path.join(output_folder, f"{new_name}_{counter}{file_extension}")
             counter += 1
         os.rename(img_path, full_new_name)
-        print(f"Renommage : {img_path} -> {full_new_name}")
-    except Exception as e:
-        print(f"Erreur lors du renommage de {img_path} : {e}")
+    return full_new_name
 
-def process_folder(folder):
+def process_file(img_path, output_folder):
+    file = os.path.basename(img_path)
+    file_extension = os.path.splitext(file)[-1].lower()
+
+    if is_already_renamed(file):
+        return f"{file} -> déjà renommé, on skip"
+
+    if file_extension in ['.heic', '.heif']:
+        jpeg_path = img_path.rsplit(file_extension, 1)[0] + '.jpeg'
+        convert_heic_to_jpeg_with_exif(img_path, jpeg_path)
+        os.remove(img_path)
+        date = get_date_taken(jpeg_path)
+        if date is None:
+            return f"Impossible de renommer {jpeg_path} : date EXIF introuvable."
+        new_path = safe_rename(jpeg_path, output_folder, date)
+        return f"Conversion + renommage : {img_path} -> {new_path}"
+
+    elif file_extension in ['.jpg', '.jpeg', '.png']:
+        date = get_date_taken(img_path)
+        if date is None:
+            return f"Impossible de renommer {img_path} : date EXIF introuvable."
+        new_path = safe_rename(img_path, output_folder, date)
+        return f"Renommage : {img_path} -> {new_path}"
+
+    else:
+        return f"{file} -> Ce fichier n'est pas une image valide."
+
+def collect_files(folder):
+    tasks = []
     for root, dirs, files in os.walk(folder):
         for file in files:
-            img_path = os.path.join(root, file)
-            file_extension = os.path.splitext(file)[-1].lower()
+            tasks.append((os.path.join(root, file), root))
+    return tasks
 
-            if is_already_renamed(file):
-                print(f"{file} -> déjà renommé, on skip")
-                continue
+def process_folder(folder, workers):
+    tasks = collect_files(folder)
+    print(f"{len(tasks)} fichiers à traiter avec {workers} threads.")
 
-            if file_extension in ['.heic', '.heif']:
-                img_path_jpg = img_path.rsplit(file_extension, 1)[0] + '.jpeg'
-                if convert_heic_to_jpeg_with_exif(img_path, img_path_jpg):
-                    os.remove(img_path)
-                    print(f"Fichier HEIC supprimé : {img_path}")
-                    rename_jpeg(img_path_jpg, root)
-                else:
-                    print(f"Conversion échouée pour {img_path}. Le fichier source est conservé.")
-            elif file_extension in ['.jpg', '.jpeg', '.png']:
-                rename_jpeg(img_path, root)
-            else:
-                print(f"{file} -> Ce fichier n'est pas une image valide.")
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(process_file, img_path, output_folder): img_path
+            for img_path, output_folder in tasks
+        }
+        for future in as_completed(futures):
+            img_path = futures[future]
+            try:
+                print(future.result())
+            except Exception as e:
+                print(f"Erreur sur {img_path} : {e}")
 
 parser = argparse.ArgumentParser()
 parser.add_argument("folder", help="Dossier contenant les images", type=str)
+parser.add_argument("--workers", type=int, default=os.cpu_count(), help="Nombre de threads (défaut: nombre de CPUs)")
 args = parser.parse_args()
 
-process_folder(args.folder)
+process_folder(args.folder, args.workers)
