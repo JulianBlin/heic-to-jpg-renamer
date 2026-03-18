@@ -18,7 +18,13 @@ def is_already_renamed(filename):
 def convert_heic_to_jpeg_with_exif(heic_path, jpeg_path):
     with Image.open(heic_path) as heic_image:
         exif_data = heic_image.info.get("exif", None)
-        heic_image.save(jpeg_path, "JPEG", quality=100, subsampling=0, exif=exif_data)
+        icc_profile = heic_image.info.get("icc_profile", None)
+        save_kwargs = {"quality": 100, "subsampling": 0}
+        if exif_data:
+            save_kwargs["exif"] = exif_data
+        if icc_profile:
+            save_kwargs["icc_profile"] = icc_profile
+        heic_image.save(jpeg_path, "JPEG", **save_kwargs)
     return jpeg_path
 
 def get_date_taken(img_path):
