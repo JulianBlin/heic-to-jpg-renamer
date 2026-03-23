@@ -50,7 +50,18 @@ def safe_rename(img_path, output_folder, date):
         os.rename(img_path, full_new_name)
     return full_new_name
 
-def process_file(img_path, output_folder):
+def strip_hdr(img_path):
+    with Image.open(img_path) as img:
+        exif_data = img.info.get("exif", None)
+        icc_profile = img.info.get("icc_profile", None)
+        save_kwargs = {"quality": 100, "subsampling": 0}
+        if exif_data:
+            save_kwargs["exif"] = exif_data
+        if icc_profile:
+            save_kwargs["icc_profile"] = icc_profile
+        img.save(img_path, "JPEG", **save_kwargs)
+
+def process_file(img_path, output_folder, do_strip_hdr=False):
     file = os.path.basename(img_path)
     file_extension = os.path.splitext(file)[-1].lower()
 
@@ -68,11 +79,14 @@ def process_file(img_path, output_folder):
         return f"Conversion + renommage : {img_path} -> {new_path}"
 
     elif file_extension in ['.jpg', '.jpeg', '.png']:
+        if do_strip_hdr and file_extension in ['.jpg', '.jpeg']:
+            strip_hdr(img_path)
         date = get_date_taken(img_path)
         if date is None:
             return f"Impossible de renommer {img_path} : date EXIF introuvable."
         new_path = safe_rename(img_path, output_folder, date)
-        return f"Renommage : {img_path} -> {new_path}"
+        suffix = " (HDR supprimé)" if do_strip_hdr and file_extension in ['.jpg', '.jpeg'] else ""
+        return f"Renommage{suffix} : {img_path} -> {new_path}"
 
     else:
         return f"{file} -> Ce fichier n'est pas une image valide."
@@ -90,7 +104,7 @@ def process_folder(folder, workers):
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(process_file, img_path, output_folder): img_path
+            executor.submit(process_file, img_path, output_folder, args.strip_hdr): img_path
             for img_path, output_folder in tasks
         }
         for future in as_completed(futures):
@@ -103,6 +117,7 @@ def process_folder(folder, workers):
 parser = argparse.ArgumentParser()
 parser.add_argument("folder", help="Dossier contenant les images", type=str)
 parser.add_argument("--workers", type=int, default=os.cpu_count(), help="Nombre de threads (défaut: nombre de CPUs)")
+parser.add_argument("--strip-hdr", action="store_true", help="Supprimer le gain map HDR des JPEG")
 args = parser.parse_args()
 
 process_folder(args.folder, args.workers)
